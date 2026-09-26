@@ -1,19 +1,23 @@
 # Element Mark
 
-给 GUI 中的材料物品绘制化学元素符号角标（Zn、Cu、Fe……），位置可选四个角落。
+给 GUI 中的材料物品绘制角标（元素符号 `Zn`/`Cu`/`Fe`，或中文名「铁」「青铜」），位置可选四个角落。
 
-不绑定任何具体模组：符号通过物品的 **矿辞 tag（ore dictionary / common tag）** 解析（流体容器则按流体注册 ID），因此凡是遵循 `c:` / `forge:` 材料 tag 规范的模组（格雷科技、ChemLib、Create 等）都能自动生效。
+不绑定任何具体模组：符号通过物品的 **矿辞 tag（ore dictionary / common tag）** 解析（流体容器则按流体注册 ID），因此凡是遵循 `c:` / `forge:` 材料 tag 规范的模组（格雷科技、ChemLib、Create 等）都能自动生效；装了**格雷科技：现代版**时，还会进一步走 GT 自己的材料体系，把合金、化合物、以及附属模组 / KubeJS 注册的材料一并自动识别。
+
+此外还给 **Forge 的模组列表搜索框**接入了拼音与"忽略字母位置"匹配（见「模组搜索增强」）。
 
 ## 工作原理
 
 1. 客户端 mixin 注入 `ItemRenderer.render` 的 `TAIL`，仅在 GUI 展示语境下追加绘制。
-2. `BadgeResolver` 按两条途径解析材料名，先命中先用：
+2. `BadgeResolver` 按三条途径解析材料名，先命中先用：
    - **物品 tag**：读取物品 `Holder` 上的 tag，只认 `c:` / `forge:` 命名空间、路径形如 `<form>/<material>` 的 tag（如 `c:plates/zinc`），取 `/` 后段作为材料名；
+   - **GT 材料体系**（装了 GTCEu 时）：`ChemicalHelper.getMaterialEntry` 认出物品属于哪个材料，先拿**材料注册名**再查一次表（于是配置与内置表能覆盖 GT 物品），未命中则直接采用 GT 语言文件里的**本地化名称**，最后退回元素符号。这一路覆盖 GTM 本体、所有 `IGTAddon` 附属模组、以及 KubeJS 注册的材料，**不依赖物品有没有 tag**；
    - **流体**：桶这类物品不带材料类 tag，改用桶内**流体的注册 ID** 反查（`gtceu:soldering_alloy_bucket` 装的流体是 `gtceu:soldering_alloy` → `soldering_alloy`）。
 3. 材料名查表时除原名外还尝试形态变体，剥掉形态标记后仍是同一个材料：
    `raw_lead`（粗矿块 tag 段）、`molten_steel` / `liquid_oxygen`（熔融/液化流体）、`iron_plasma`（等离子体）。**全名永远优先**，`black_bronze`、`red_steel` 这类"前缀是材料名一部分"的真材料不会被误剥。
-4. 材料名先查**用户配置**，再查内置 118 元素表；命中则绘制缩写，两处都无命中则不绘制。
-5. 结果按 `Item` / `Fluid` 分别缓存在 `ConcurrentHashMap`，每个物品只解析一次；配置重载时清空缓存（F3+T 会一并触发，所以新打的 tag 也会立即生效）。
+4. 材料名依次查 **① 用户配置 → ② 内置中文名表（`elementmark.txt`，646 条）→ ③ 内置 118 元素符号表**；命中则绘制，三处都无命中则不绘制。配置里**显式写了某个键**就一律以配置为准——包括显式留空（`lead:`）这种"关掉该材料角标"的写法。
+5. 结果按 `Item` / `Fluid` 分别缓存，每个物品只解析一次；配置重载时清空缓存（F3+T 会一并触发，所以新打的 tag 也会立即生效）。
+   GT 的材料表要等**全部材料注册收口**后才能查询，收口前查询会抛异常、几条 GT 途径于是全部落空。这时的落空**不写缓存**（下一帧重算），否则那个物品会永远不再显示角标——"装了 GT 但某些物品没角标"多半就是这个时序。
 6. **JEI 流体条目**：JEI 画流体图标走的是它自己的 `FluidTankRenderer`（不经过 `ItemRenderer.render`），故另有一支 mixin 挂在它的 `render(GuiGraphics, T, x, y)` 上，在流体贴图之上叠画角标。JEI 未安装时该 mixin 的目标类不会加载，自然不生效。 **流体槽（TankWidget）另有一条路**：带容量/液位的流体槽（GT 配方界面、ExtendedAE 电路切片器等）由 EMI 的 TankWidget 渲染，它重写了 drawStack、按 16px 瓦片逐行画液位而不经过 FluidEmiStack.render，故另有 TankWidgetMixin 挂其 `RETURN` 叠画角标（两条路互不重叠、不会双重绘制）。 **GT / lowdraglib 模组的配方界面走的是完全独立的第三条路**：它们的流体槽由各自的 GUI widget（GT 的 TankWidget 直接继承 LDLib 的 Widget）在 ``drawInBackground`` 里直接画贴图，EMI/JEI 的栈渲染完全不参与，故另有两支 mixin 分别挂 GT 与 LDLib 的 TankWidget；JEI 桥接的模组（无 EMI 插件、只有 JEI 集成，如 ExtendedAE）在 EMI 里则经 JEMI 桥接渲染——`JemiStackMixin` 覆盖栈自身渲染的那条路，`JemiSlotWidgetMixin` 覆盖 `JemiSlotWidget` 覆写的 `drawStack`（它不复用 `SlotWidget.drawStack`，而是直接取 JEI 的 `IIngredientRenderer` 画，两条 EMI 侧注入都碰不到它）。这些 widget 同时服务机器自身 GUI，故只在当前屏幕为 EMI/JEI 时绘制（按屏幕类名前缀判断，避免引用可能不存在的类）。**取流体的来源必须与该 widget 实际绘制的来源一致**：GT 的 `TankWidget.drawInBackground` 画的是字段 `lastFluidInTank`，而公开方法 `getFluid()` 只在 `isClientSideWidget` / `isRemote()` 为真时才返回它，否则回落到 `fluidTank`——配方界面里 GT 会把流体槽 handler 换成 `EmptyFluidHandler`（见 `GTEmiRecipe.addWidgets`），此时 `getFluid()` 为空但流体照画，表现为"贴图有、角标没有"。故 GT / LDLib 两支均以 `lastFluidInTank` 为主、`getFluid()` 兜底。同理，EMI 槽位的准入也不假设"配料恰好一项"——GT 在 JEI 共存时会把流体包成 `ClickableIngredient` 交给 EMI（`TankWidget$JEICallWrapper.getJEIFluidClickable`），故按 EMI `drawStack` 的语义遍历 `getEmiStacks()` 取第一个流体栈。
 7. **EMI 流体条目**：EMI 的流体图标由 `FluidEmiStack.render(GuiGraphics, x, y, delta, flags)` 直接绘制（内部经 `EmiAgnos.renderFluid`），是索引页 / 配方槽 / 侧栏的唯一每帧入口，故 mixin 挂在这里（只在 `RENDER_ICON` 位时绘制）。流体栈未被 EMI 批处理烘焙（`StackBatcher$Batchable` 只由物品栈实现），该方法按帧执行，角标持续可见。EMI / JEI 两套绘制路径共用同一份 `BadgePlacement` 定位与 `BadgeResolver.resolveFluid` 解析。
 
@@ -36,6 +40,108 @@ ServerEvents.tags('item', event => {
 ```
 
 同时在配置文件里加 `white_sugar:白砂糖` 一行。tag 随 datapack 同步到客户端，F3+T 生效。
+
+## 电路板电压角标
+
+识别出**格雷科技电路板**时，角标改画它的**电压等级**（`ULV` / `LV` / … / `MAX`），并**整个取代**元素角标——电路板不可能带化学元素，两者不会同时出现。位置固定**左上角**（元素角标才跟 `corner` 设置走）。
+
+### 识别顺序
+
+先命中先用，四条途径逐级下探：
+
+| 顺序 | 来源 | 说明 |
+| --- | --- | --- |
+| ① | 配置手写映射 | `elementmark-client.toml` 的 `overrides`，用户显式写的最大，也是"自动认错了"的补救手段 |
+| ② | 物品 tag | 路径形如 `circuits/<等级>` 的标签（GT 用 `gtceu:circuits/ulv … max`）。**不限命名空间**——附属模组用别的命名空间打同一套标签是常见做法 |
+| ③ | 内置识别表 | 28 个 GT 本体电路，按**注册名**或**当前语言的显示名**（中英皆收）匹配 |
+| ④ | Tooltip | 扫 `"HV-Tier Circuit"` / `"HV级电路"` 这类文案。GT 本体每个电路的第二行 tooltip 都写着等级，附属模组普遍照抄 |
+
+> **为什么内置表排在 Tooltip 前面**：内置表只收录 GT 本体的 28 个电路，而这些物品的 Tooltip 与内置表**必然同值**（表就是从 GT 的 tag 与语言文件抄的），所以两者相对顺序对任何 GT 物品都不会产生不同结果。反过来先查表能避开一次 `getTooltipLines`——那要构造整份 tooltip 列表（含所有模组的 tooltip 回调），是四条途径里最贵的一步。**语义上仍是"Tooltip 优先于名字"，实现上把等价的廉价查表提到了前面。**
+
+标签在 datapack 加载后不再变化，结果按 `Item` 缓存（含"不是电路"这一否定结论），配置重载时清空。
+
+### 等级与配色
+
+等级名与配色**逐项取自 GT 自己的源码**（`GTValues.VN` 与 `GTValues.VC`），不是抄来的近似色：
+
+| 等级 | ULV | LV | MV | HV | EV | IV | LuV | ZPM | UV | UHV | UEV | UIV | UXV | OpV | MAX |
+| --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- | --- |
+| 颜色 | `C80000` | `DCDCDC` | `FF6400` | `FFFF1E` | `808080` | `F0F0F5` | `E99797` | `7EC3C4` | `7EB07E` | `BF74C0` | `0B5CFE` | `914E91` | `488748` | `8C0000` | 动态彩虹 |
+
+`LuV` / `OpV` 的大小写是 GT 自己的写法，显示时原样照抄。
+
+### MAX 的动态彩色（文字当蒙版）
+
+`MAX` 不是"把字染成彩色"，而是**字形当蒙版、蒙版下面是流动的彩图**，实现方式是**包装 `VertexConsumer`**，**不需要自定义着色器、不需要额外贴图**：
+
+1. 原版字体纹理是**灰度（intensity）纹理**，`rendertype_text_intensity.fsh` 的算法是 `color = texture(...).rrrr * vertexColor`，即 **最终颜色 = 字形覆盖率 × 顶点色**。这正是"蒙版"的数学形式——字形覆盖率是蒙版，顶点色是蒙版下透出来的颜色；
+2. `BakedGlyph.render` 对每个顶点固定走 `vertex(...) → color(FFFF) → uv(...) → uv2(...) → endVertex()`，其中 `color` 是接口方法；
+3. 于是只要在 `MultiBufferSource.getBuffer(...)` 处包一层，在颜色即将写进缓冲的那一刻按顶点坐标换成彩虹色，字形几何 / UV / 光照全部原样透传。**这是唯一能逐顶点着色的位置**——在 `drawInBatch` 层面传色的话，整段文字只能是一个颜色。
+
+色相取 `(x + y*0.5) / 波长 + 相位`，于是彩虹沿**对角线**流动，而不是一条竖直色带平移（后者在只有两三个字的角标上几乎看不出在动）。相位由 `Util` 的毫秒数算出，与帧率无关；周期由 `rainbow_cycle_seconds` 配置。
+
+`MAX` 只画一遍主体、不画深灰描边层：描边是把同一段文字在偏移处再画一次，两层彩虹在半透明边缘叠加会糊成一团，反而看不出"字是蒙版"。
+
+> 上面三条都不是推测：`BakedGlyph.render` 的调用链与 `rendertype_text_intensity.fsh` 的算法都是从字节码 / 资源文件里读出来的。链路上 `Font.drawInternal → MultiBufferSource.getBuffer → Font.renderChar → BakedGlyph.render(..., VertexConsumer, ...)` 已逐条核对。
+
+### 配置
+
+新增 `config/elementmark-client.toml`（**Forge 自带配置系统**，改完保存即时生效）：
+
+```toml
+[circuit]
+	# 是否绘制电路板电压角标
+	enabled = true
+	# 手写等级映射，格式 "<物品>=<等级>"；物品可写完整 id / 仅 path / 当前语言显示名
+	overrides = ["gtceu:my_circuit=ZPM", "我的电路=MAX"]
+	# MAX 彩虹一个完整周期的秒数
+	rainbow_cycle_seconds = 4.0
+```
+
+> **为什么不并进 `elementmark.txt`**：那个文件是"材料名 → 缩写"的键值表，格式为每行 `段名:值`，天生表达不了列表；而本模块需要的是**字符串列表**（`overrides`）。硬塞进去要么破坏现有解析口径，要么再发明一套转义规则。两个配置各管各的：`elementmark.txt` 管元素/材料缩写，本文件管电路板。
+
+## 模组搜索增强
+
+**Forge 自带的模组列表搜索框**（主菜单 → `模组`，搜索框在列表上方）现在支持拼音与"忽略字母位置"。这一段与任何配置模组无关——那个搜索框属于 Forge 自己的 `net.minecraftforge.client.gui.ModListScreen`。
+
+### 语法
+
+| 输入 | 含义 | 例子 |
+| --- | --- | --- |
+| 空格 | **或**：任一 token 命中即可 | `n u` → 名称里含 `n` **或**含 `u` |
+| 加号 | **忽略字母位置**：各段都要出现，**顺序与位置都不限** | `n+u` → 含 `n` 且含 `u`；`u+n` 与它等价 |
+| 普通词 | 先按原文子串匹配（与 Forge 原生完全一致） | `greg` → `GregTech` |
+| 拼音 | 中文名按全拼或首字母匹配 | `glkj` / `gelei` → `格雷科技` |
+
+多个加号可连用：`a+b+c` 表示三段都要出现（任意顺序）。加号也可以与空格混用（`n+u x` = "含 n 且含 u" 或 "含 x"）。
+
+### 匹配层次
+
+对每个 token，**先原文、后拼音**：
+
+1. **原文**（大小写不敏感）：把 token 按 `+` 拆成若干段，各段**都**在名称里出现即命中（段内连续、段间顺序与位置均不限，故 `u+n` 与 `n+u` 等价）。只有一段时就退化成普通 `contains`——**与 Forge 原生行为逐字一致**，所以英文/数字搜索的手感没有任何变化；
+2. **拼音**：交给 JustEnoughCharacters（PinIn）。
+
+先廉价后昂贵是刻意的：PinIn 内部要建索引，而实际使用中绝大多数查询是英文/数字，本来就该被第一层直接命中，最常用的路径完全不会碰到它。
+
+### 依赖 JustEnoughCharacters，但不强制
+
+拼音那一层通过**反射**接入 JEC 的 `me.towdium.jecharacters.utils.Match#contains`：
+
+- **装了** → 自动生效，日志里有一行 `已接入 JustEnoughCharacters，模组搜索支持拼音`；
+- **没装** → 静默退化成原文匹配，日志里有一行 `未检测到 JustEnoughCharacters，模组搜索将只做原文匹配（无拼音）`，功能其余部分完全正常。
+
+用反射而非编译期依赖是必需的：JEC 是可选的客户端模组，直接 `import` 会让没装它的整合包在类解析阶段抛 `NoClassDefFoundError`，把整个模组列表界面打崩。
+
+> **参数顺序踩过坑（已实测钉死）**：JEC 的签名是 `contains(被搜索的文本, 查询串)`，与直觉相反。实测 `contains("钢铁", "gt") = true` 而 `contains("gt", "钢铁") = false`，传反了拼音就永远搜不到。公开资料里对此有相反说法，以实测为准。
+>
+> **PinIn 不做 ASCII 子序列匹配**：实测 `contains("GregTech", "gt") = false`。所以"忽略字母位置"这件事不能指望 JEC，由本模组的 `ModSearchMatcher` 自己实现（就是那个加号语法）。
+
+### 注入方式
+
+注入点是 `ModListScreen.reloadMods()V` 的 `HEAD`，用 `cancellable` 整体接管。**没有**去改那行 `String.contains`——原实现把过滤写在 lambda 里，会编译成 `lambda$reloadMods$9` 这种**编号随编译环境漂移**的合成方法，拿它当注入目标非常脆弱（实测 47.4.13 的编号确实是 `$9`，正说明它不可依赖）。`reloadMods()V` 是有名字的真实方法、描述符恒定，在 Forge 47.x 全系列都存在。
+
+`require = 0`：将来 Forge 若改了方法名/描述符，本注入**静默失效**（退回原生搜索）而不是让游戏起不来。
 
 ## 配置界面
 
@@ -72,9 +178,25 @@ font_scale:0.9           保留段：缩写尺寸系数，在自动适配的基�
 scroll:loop              保留段：超长缩写的移动方式，sway（左右摆动）| loop（单向循环）
 ```
 
-上面三段的出厂默认就是 `top_left` / `0.9` / `loop`（代码里的 `DEFAULT_CONTENT` 与之一致）：这一套是实测比对后选定的偏好，新装玩家上手即"调好的状态"，不必自己再摸一遍。
+上面三段的出厂默认就是 `top_left` / `0.9` / `loop`：这一套是实测比对后选定的偏好，新装玩家上手即"调好的状态"，不必自己再摸一遍。
 
-想把 118 个元素的角标从化学符号换成**中文名**（氢、氦、锂……全部单字）：仓库根目录提供现成的 [`elementmark-元素中文.txt`](elementmark-元素中文.txt)——完整覆盖内置表 121 个材料键（118 元素 + 3 组英式/美式拼写别名），整个文件替换 `config/elementmark.txt` 即可。文件必须以 UTF-8 保存；109~118 号元素的中文用字（𬬻 𬭊 鿔 等）是生僻字，显示效果取决于字体包覆盖范围。
+### 内置中文名表（`elementmark.txt` 已直接集成）
+
+仓库根目录的 `elementmark.txt` **已打进 jar**（`assets/elementmark/builtin_names.txt`），并且**首次运行写出的 `config/elementmark.txt` 就是它的全文**——包含 118 元素 + 3 组英式/美式拼写别名，以及 536 条 GTCEu 扩展材料（钢、青铜、合金、化合物、各类流体），共 **646 条材料条目**。装完即见中文名，不需要任何手动替换。
+
+它的作用不止"默认值"，而是**用户配置的下一级兜底**：
+
+| 优先级 | 来源 | 说明 |
+| --- | --- | --- |
+| ① | `config/elementmark.txt` | 用户显式写的键一律以此为准，**包括值留空**（`lead:` 隐藏铅的角标） |
+| ② | 内置中文名表（646 条） | 配置里没写的键来这里查——老用户升级后不被旧配置挡住 |
+| ③ | 内置 118 元素符号表 | 最后兜底（`H` / `He` / …） |
+
+所以想改某个材料只需在配置里加一行覆盖；想把角标换回化学符号，写 `zinc:Zn` 即可。
+
+> 早期版本要求玩家自己把 `elementmark.txt` 复制到 `config/` 目录（仓库里另有一份 [`elementmark-元素中文.txt`](elementmark-元素中文.txt) 供手动替换）。现在这一步已经不需要了，那份文件保留仅为兼容旧习惯。
+>
+> 文件以 UTF-8 保存；109~118 号元素的中文用字（𬬻 𬭊 鿔 等）是生僻字，显示效果取决于字体包覆盖范围。
 
 改完存盘后，按 `F3+T` 重载资源即可生效，无需重启游戏。配置界面里也有「重新读取配置」按钮，改完 `font_scale` 不用来回退出界面。
 
@@ -257,6 +379,10 @@ scale(16, 16, 16)                   // ★ 三分量全正
 | Minecraft | 1.20.1 |
 | Forge | 47.x |
 | 侧 | 仅客户端（纯渲染，服务端不需要装） |
+| 格雷科技：现代版 | **可选**。装了则自动识别全部 GT 材料（含合金、化合物、附属模组与 KubeJS 注册的内容）；没装则走 tag 途径 |
+| JustEnoughCharacters | **可选**。装了则模组搜索支持拼音；没装则退化为原文匹配 |
+
+两者都是**运行期探测**（查模组 ID，不做编译期依赖），因此这个 jar 在有/没有它们的整合包里都能直接用，不需要区分布局。GT 的材料 API 与 JEC 的入口分别被隔离在 `compat/GtCompat` 与 `search/PinyinBridge` 两个类里，靠 JVM 常量池的惰性解析保证"没装就不会加载"。
 
 ## 排查"某个界面没有角标"
 

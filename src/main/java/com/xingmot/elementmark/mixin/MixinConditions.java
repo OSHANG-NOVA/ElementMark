@@ -92,6 +92,13 @@ public class MixinConditions implements IMixinConfigPlugin {
             // === JEI 兼容 ===
             else if (mixinClassName.startsWith("com.xingmot.elementmark.mixin.jei.")) {
                 allow = isJeiPresent();
+            }
+            // === Forge 自身界面（模组列表搜索框） ===
+            // 目标是 net.minecraftforge.client.gui.ModListScreen，属于 Forge 本体而非第三方模组，
+            // 因此不需要探测任何模组 ID：Forge 在就说明它在。保留这个分支只为让日志口径统一
+            // （每个 mixin 都会被打印出"放行/跳过"），排查"搜索没有拼音"时一眼能看出它有没有被应用。
+            else if (mixinClassName.startsWith("com.xingmot.elementmark.mixin.forge.")) {
+                allow = true;
             } else {
                 allow = true;
             }

@@ -15,7 +15,8 @@
         "emi.JemiSlotWidgetMixin",
         "emi.JemiStackMixin",
         "gt.TankWidgetMixin",
-        "ldlib.TankWidgetMixin"
+        "ldlib.TankWidgetMixin",
+        "forge.ModListScreenMixin"
     ],
     "injectors": {
         "defaultRequire": 1

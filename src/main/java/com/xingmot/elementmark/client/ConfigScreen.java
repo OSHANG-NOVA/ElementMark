@@ -6,6 +6,7 @@ import com.xingmot.elementmark.BadgeResolver;
 import com.xingmot.elementmark.ConfigLoader;
 import com.xingmot.elementmark.ConfigLoader.Corner;
 import com.xingmot.elementmark.ConfigLoader.ScrollMode;
+import com.xingmot.elementmark.circuit.CircuitDetector;
 
 import net.minecraft.client.Minecraft;
 import net.minecraft.client.gui.GuiGraphics;
@@ -125,6 +126,8 @@ public class ConfigScreen extends Screen {
         this.addRenderableWidget(Button.builder(Component.translatable("elementmark.config.reload"), button -> {
                     ConfigLoader.reload();
                     BadgeResolver.invalidate();
+                    // 电路识别同样按物品缓存，一起清；手写映射也在此后重新解析
+                    CircuitDetector.invalidate();
                     // 文件被外部改过（手写成 1.2、换了个角、改了滚动方式）时，让三个控件的显示都跟上，
                     // 否则"界面上的值"与"真正生效的值"会悄悄分家
                     this.cornerButton.setMessage(cornerLabel(ConfigLoader.corner()));
@@ -171,10 +174,12 @@ public class ConfigScreen extends Screen {
             ItemStack stack = PREVIEW_STACKS[i];
             int x = startX + i * STRIDE;
             graphics.renderItem(stack, x, previewY);
-            // 每个样例下面标出解析出的缩写，便于对照是哪个物品出的问题
-            String badge = BadgeResolver.resolve(stack);
+            // 每个样例下面标出解析出的缩写，便于对照是哪个物品出的问题。
+            // 走 ElementMarkClient.resolveBadge（与实机绘制同一份解析），
+            // 于是电路板这里标的就是电压等级，而不是"没有元素"的空结果。
+            ElementMarkClient.Badge badge = ElementMarkClient.resolveBadge(stack);
             graphics.drawCenteredString(this.font,
-                    badge == null ? "-" : badge,
+                    badge == null ? "-" : badge.text(),
                     x + 8, previewY + 20, 0x606060);
         }
 

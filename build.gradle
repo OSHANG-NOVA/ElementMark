@@ -24,10 +24,12 @@ plugins {
     id('dev.architectury.loom').version('1.10-SNAPSHOT')
     id('maven-publish')
     id('idea')
-    id('com.matthewprenger.cursegradle').version('1.4.0').apply(false) //only used for CF publishing
-    id('com.modrinth.minotaur').version('2.+').apply(false)            //only used for Modrinth publishing
+    // 发布类插件（cursegradle / minotaur）已移除：本工程离线构建时其传递依赖不在缓存中，
+    // 且它们在 plugins 块里即使 .apply(false) 也会强制参与 buildscript classpath 解析。
+    // 需要发布时再按需临时加回（见 gradle/scripts/publishing.gradle 的开关）。
     id('org.jetbrains.changelog').version('2.2.0')
-    id('xyz.wagyourtail.jvmdowngrader').version("${jvmdowngrader_version}").apply(false)
+    // jvmdowngrader 插件同样已移除：本工程 use_jvmdowngrader=false，不需要它，
+    // 而它在离线环境下的传递依赖（commons-codec 1.16.1）不在缓存中。
 }
 
 apply from: 'gradle/scripts/helpers.gradle'
@@ -173,6 +175,16 @@ processResources {
 
     if (!propertyBool('use_mixin')) {
         exclude(propertyStringList('mixin_configs').collect({"${it}.json"}))
+    }
+
+    // expand(...) 的取值默认**不被** Gradle 的 up-to-date 检查追踪：只改 gradle.properties 里的
+    // mod_version 时，processResources 仍会被判为 UP-TO-DATE，于是 jar 里的 mods.toml 停留在
+    // 旧版本号——表现为"产物文件名是 1.1.0、里面的 version 却是 1.0.2"。把参与展开的取值
+    // 显式登记为任务输入，版本号一改就会重新展开。
+    ['mod_version', 'forge_version', 'loader_version_range', 'license', 'mod_id',
+     'mod_display_name', 'mod_author', 'mod_description', 'minecraft_version',
+     'required_minecraft_range', 'resource_pack_format'].each {
+        inputs.property(it, propertyString(it))
     }
 
     def filters = ['META-INF/mods.toml', 'pack.mcmeta']

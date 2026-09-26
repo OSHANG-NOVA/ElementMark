@@ -5,6 +5,10 @@ import org.joml.Matrix4f;
 import com.mojang.blaze3d.vertex.PoseStack;
 import com.xingmot.elementmark.BadgeResolver;
 import com.xingmot.elementmark.ConfigLoader;
+import com.xingmot.elementmark.circuit.CircuitConfig;
+import com.xingmot.elementmark.circuit.CircuitDetector;
+import com.xingmot.elementmark.circuit.RainbowVertexConsumer;
+import com.xingmot.elementmark.circuit.VoltageTier;
 
 import net.minecraft.Util;
 import net.minecraft.client.Minecraft;
@@ -93,8 +97,24 @@ public final class ElementMarkClient {
     private static final float ANCHOR_Y = -BadgePlacement.ICON_SIZE / 2.0F;
     /** z 抬升（字形单位）。flat 模型朝前表面在 z=+0.5 单位，方块模型 GUI 旋转后顶点最多 ~0.87，取 1.5 物品单位（=30 字形单位）稳定在前 */
     private static final float Z_LIFT = 30.0F;
+    /**
+     * 元素角标的主体色（白）。
+     *
+     * <p>只有元素角标用它；电路角标改用 {@link VoltageTier#COLORS} 的等级配色，
+     * {@code OpV} / {@code MAX} 两档再改成动态色相（连这个常量都不参与）。
+     */
     private static final int COLOR_FILL = 0xFFFFFF;
+    /** 描边色（浅色主体用） */
     private static final int COLOR_EDGE = 0x333333;
+    /**
+     * 描边色（深色主体用）。
+     *
+     * <p>原本描边恒为深灰——那时主体恒为白色，深灰垫在白色底下正好勾出轮廓。
+     * 改成按电压等级配色后，{@code UEV}（{@code 1E40D8}，深蓝）这类暗色主体
+     * 再垫深灰就完全没有轮廓了，于是按主体明度二选一（见 {@link #edgeColorFor}）。
+     * 用户自定义的这套配色里只有 {@code UEV} 一档落在"需要浅描边"的那一侧。
+     */
+    private static final int COLOR_EDGE_LIGHT = 0xE8E8E8;
     /**
      * 滚动的横向速度（字形单位 / 秒）。1 字形单位 = 0.8 屏幕像素，即约 19 屏幕像素/秒。
      *
@@ -127,17 +147,75 @@ public final class ElementMarkClient {
 
     private ElementMarkClient() {}
 
-    public static void drawBadge(ItemStack stack, PoseStack pose, MultiBufferSource buffer, int light) {
+    /**
+     * 一次角标解析的完整结果。
+     *
+     * @param text     要画的文字（元素缩写，或电路电压等级名）
+     * @param animated 是否走动态色相蒙版（{@code OpV} / {@code MAX}）。
+     *                 为 {@code true} 时 {@code color} 不生效——颜色由
+     *                 {@code RainbowVertexConsumer} 逐顶点生成。
+     * @param color    主体文字色（{@code 0xRRGGBB}）。元素角标恒为白，电路角标取
+     *                 {@link VoltageTier#COLORS} 的等级配色——"颜色"必须由本 record 承载，
+     *                 才能让绘制与配置界面预览拿到同一个值，不至于出现"预览白、实机彩"。
+     * @param hueStart 动态色相的区间起点（0~1）。{@code animated} 为 {@code false} 时无意义
+     * @param hueEnd   动态色相的区间终点（0~1）。{@code animated} 为 {@code false} 时无意义
+     * @param corner   画在哪个角
+     */
+    public record Badge(String text, boolean animated, int color, float hueStart, float hueEnd,
+                        ConfigLoader.Corner corner) {}
+
+    /**
+     * 解析某个物品最终该显示什么角标。
+     *
+     * <p><b>唯一出处</b>：绘制（{@link #drawBadge}）与配置界面的预览标注都调它，
+     * 于是"预览里写的字"与"实机画出来的字"不可能分家——与 {@link BadgePlacement}
+     * 之于定位是同一个设计原则。
+     *
+     * <p><b>电路优先于元素</b>：电路板不可能带化学元素，故一旦认出电压等级就
+     * <b>整个取代</b>元素角标（用户明确要求"如果显示了这个电压等级 就直接覆盖元素"）。
+     * 电路角标固定左上角，元素角标才跟用户的 corner 设置走——电压等级是
+     * "一眼扫过去找最高档"的用途，固定在左上比跟着角落设置飘更实用。
+     *
+     * @return 该物品的角标；两者都没有时返回 {@code null}（不画）
+     */
+    public static Badge resolveBadge(ItemStack stack) {
+        int tier = CircuitConfig.enabled() ? CircuitDetector.detect(stack) : CircuitDetector.NOT_CIRCUIT;
+        if (tier != CircuitDetector.NOT_CIRCUIT) {
+            String name = VoltageTier.nameOf(tier);
+            return name == null ? null
+                    : new Badge(name, VoltageTier.isAnimated(tier), VoltageTier.colorOf(tier),
+                                VoltageTier.hueStartOf(tier), VoltageTier.hueEndOf(tier),
+                                ConfigLoader.Corner.TOP_LEFT);
+        }
         String symbol = BadgeResolver.resolve(stack);
-        if (symbol == null) {
+        return symbol == null
+                ? null
+                : new Badge(symbol, false, COLOR_FILL, 0.0F, 1.0F, ConfigLoader.corner());
+    }
+
+    public static void drawBadge(ItemStack stack, PoseStack pose, MultiBufferSource buffer, int light) {
+        Badge badge = resolveBadge(stack);
+        if (badge == null) {
             return;
         }
+        String symbol = badge.text();
+        boolean animated = badge.animated();
 
         Font font = Minecraft.getInstance().font;
         // 定位与字号统一由 BadgePlacement 决定（其中已含用户的 font_scale）。
         // 本路径的 scale(SCALE, ...) 已承担"字形单位 -> 屏幕像素"的换算，
         // 故这里直接取 place.textScale() 用，不要再乘任何换算系数。
-        BadgePlacement.Placement place = BadgePlacement.compute(font, symbol, ConfigLoader.corner());
+        BadgePlacement.Placement place = BadgePlacement.compute(font, symbol, badge.corner());
+
+        // OpV / MAX 走"文字当蒙版、蒙版下流动彩图"：把数据源包成逐顶点染动态色相的版本。
+        // 包在 getBuffer 层，于是下面的 drawInBatch 调用一个字都不用改。
+        // 色相区间由 VoltageTier 给出（MAX = 整圈，OpV = 紫→红弧段），
+        // 弧段的折返逻辑在 RainbowVertexConsumer 内部，这里不必关心。
+        MultiBufferSource target = animated
+                ? RainbowVertexConsumer.wrap(buffer,
+                        RainbowVertexConsumer.phaseFor(CircuitConfig.rainbowCycleSeconds()),
+                        badge.hueStart(), badge.hueEnd())
+                : buffer;
 
         pose.pushPose();
         pose.scale(SCALE, -SCALE, SCALE);
@@ -146,7 +224,7 @@ public final class ElementMarkClient {
         // 平移必须在 scale 之前施加——PoseStack 是右乘，先调用的变换作用在更外层，
         // 于是"先平移后缩放"= T(笔位) × S(字号)，缩放锚点落在笔位上。
         pose.translate(ANCHOR_X, ANCHOR_Y, Z_LIFT);
-        drawBadgeText(font, symbol, place, pose, buffer, light);
+        drawBadgeText(font, symbol, badge.color(), place, pose, target, light, animated);
         pose.popPose();
     }
 
@@ -233,7 +311,7 @@ public final class ElementMarkClient {
         pose.pushPose();
         pose.translate(x, y, FLUID_Z_LIFT);
         pose.scale(PX_PER_GLYPH, PX_PER_GLYPH, PX_PER_GLYPH);
-        drawBadgeText(font, symbol, place, pose, guiGraphics.bufferSource(), LightTexture.FULL_BRIGHT);
+        drawBadgeText(font, symbol, COLOR_FILL, place, pose, guiGraphics.bufferSource(), LightTexture.FULL_BRIGHT, false);
         pose.popPose();
         // 立刻结算，保证文字盖在流体贴图上，不受后续渲染状态影响
         guiGraphics.bufferSource().endBatch();
@@ -242,9 +320,15 @@ public final class ElementMarkClient {
     /**
      * 在"图标左上角为原点、单位 = 字形单位、y 向下"的坐标域里绘制角标文字
      * （物品路径与 JEI 路径各自先变换到这个域，此后共用同一份定位与滚动/裁剪逻辑）。
+     *
+     * @param color   主体文字色（{@code 0xRRGGBB}）。元素角标为白，电路角标为
+     *                {@link VoltageTier#COLORS} 的等级配色；
+     *                {@code animated} 为 {@code true} 时不生效（颜色由
+     *                {@code RainbowVertexConsumer} 逐顶点生成）
+     * @param animated 是否为 {@code OpV} / {@code MAX} 的动态色相蒙版模式
      */
-    private static void drawBadgeText(Font font, String symbol, BadgePlacement.Placement place,
-                                      PoseStack pose, MultiBufferSource buffer, int light) {
+    private static void drawBadgeText(Font font, String symbol, int color, BadgePlacement.Placement place,
+                                      PoseStack pose, MultiBufferSource buffer, int light, boolean animated) {
         pose.pushPose();
         pose.translate(place.drawX(), place.drawY(), 0.0F);
         pose.scale(place.textScale(), place.textScale(), 1.0F);
@@ -253,15 +337,38 @@ public final class ElementMarkClient {
         Matrix4f matrix = pose.last().pose();
         if (place.scrolling()) {
             // 文字放不下时不再缩小，改为在图标框内横向独占一行地滚动（方式见 scroll 配置项）
-            drawScrolling(font, symbol, place, matrix, buffer, light);
+            drawScrolling(font, symbol, color, place, matrix, buffer, light, animated);
+        } else if (animated) {
+            // OpV / MAX：只画一遍。描边那层是把同一段文字在偏移处再画一次，若也套动态色相，
+            // 两层色相在半透明边缘上叠加会糊成一团，反而看不出"字是蒙版"。
+            // 传进去的颜色会被 RainbowVertexConsumer 丢弃，这里给什么都不影响。
+            font.drawInBatch(symbol, 0.0F, 0.0F, color, false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
         } else {
             // 描边偏移要除以字号，才能在屏幕上恒为 1 字形单位。
             float edge = 1.0F / place.textScale();
-            // 沿 chemlib 的双层画法：深灰偏移垫底当描边，白色主体
-            font.drawInBatch(symbol, edge, edge, COLOR_EDGE, false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
-            font.drawInBatch(symbol, 0.0F, 0.0F, COLOR_FILL, false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
+            // 双层画法：描边色偏移垫底勾出轮廓，主体色压在上面。
+            // 描边色按主体明度自动选深浅——主体深就用浅描边，否则轮廓会消失在主体里。
+            font.drawInBatch(symbol, edge, edge, edgeColorFor(color), false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
+            font.drawInBatch(symbol, 0.0F, 0.0F, color, false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
         }
         pose.popPose();
+    }
+
+    /**
+     * 按主体色的明度挑描边色：亮主体配深描边，暗主体配浅描边。
+     *
+     * <p>亮度用 ITU-R BT.601 的加权和（人眼对绿最敏感、对蓝最迟钝），
+     * 阈值 140 是按 {@link VoltageTier#COLORS} 这套用户配色实测定的：
+     * 全表只有 {@code UEV}（{@code 1E40D8}，亮度 71）落在阈值以下——
+     * 它是唯一的深蓝，浅描边才能勾出轮廓；其余各档亮度都在 142 以上
+     * （最接近阈值的是 {@code UXV} 的 142），一律用深描边。
+     */
+    private static int edgeColorFor(int fill) {
+        int r = (fill >> 16) & 0xFF;
+        int g = (fill >> 8) & 0xFF;
+        int b = fill & 0xFF;
+        int luma = (r * 299 + g * 587 + b * 114) / 1000;
+        return luma >= 140 ? COLOR_EDGE : COLOR_EDGE_LIGHT;
     }
 
     /**
@@ -317,8 +424,8 @@ public final class ElementMarkClient {
      * 文字从窗口内部起步而不是从边缘移入；给第二类<b>多乘</b>一次则会让字距被放大
      * {@code 1/textScale} 倍，每个字之间凭空多出约半个字宽的空隙。
      */
-    private static void drawScrolling(Font font, String text, BadgePlacement.Placement place,
-                                      Matrix4f matrix, MultiBufferSource buffer, int light) {
+    private static void drawScrolling(Font font, String text, int color, BadgePlacement.Placement place,
+                                      Matrix4f matrix, MultiBufferSource buffer, int light, boolean animated) {
         float textScale = place.textScale();
         // 字形单位 -> 绘制单位：本方法拿到的矩阵已经带上了 textScale，故 1 字形单位 = 1/textScale
         float toDraw = 1.0F / textScale;
@@ -342,8 +449,8 @@ public final class ElementMarkClient {
         // 全档位都落在这个区间，静止即可完整看清）。
         // 这里不能套窗口裁剪：居中后首尾两字各有半个字探出窗口，中心落在窗口外就会被整块抹掉。
         if (swing * textScale < BadgePlacement.SCROLL_MIN_SWING) {
-            drawGlyphs(font, text, (window - textWidth) * 0.5F, edge,
-                    Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY, matrix, buffer, light);
+            drawGlyphs(font, text, color, (window - textWidth) * 0.5F, edge,
+                    Float.NEGATIVE_INFINITY, Float.POSITIVE_INFINITY, matrix, buffer, light, animated);
             return;
         }
 
@@ -357,7 +464,7 @@ public final class ElementMarkClient {
         // 裁剪范围比绘制窗口每侧宽出 CLIP_SLACK（= PAD，即整块图标）：否则一次只看得见约 3 个字。
         // 只在裁剪上放宽——文字移动的起止仍按 SCROLL_WINDOW 算，两端对齐的语义不变。
         float slack = BadgePlacement.CLIP_SLACK * toDraw;
-        drawGlyphs(font, text, x, edge, -slack, window + slack, matrix, buffer, light);
+        drawGlyphs(font, text, color, x, edge, -slack, window + slack, matrix, buffer, light, animated);
     }
 
     /**
@@ -388,19 +495,25 @@ public final class ElementMarkClient {
     }
 
     /**
-     * 逐字绘制一行角标文字（各字自带深灰描边），按需裁剪。
+     * 逐字绘制一行角标文字（各字自带描边），按需裁剪。
      *
      * <p>拆出来是因为两条路径的差别只在"裁不裁"：静态居中要完整显示（不裁），
      * 滚动要挡住窗口外的部分（裁）。裁剪窗口传无穷即不裁。
      *
+     * @param color     主体文字色（{@code 0xRRGGBB}），描边色由 {@link #edgeColorFor} 按它推出
      * @param x         文字左缘（绘制单位；绘制域 = 已含 {@code textScale} 的那个域）
      * @param edge      描边偏移（绘制单位，= {@code 1/textScale} 才能在屏幕上恒为 1 字形单位）
      * @param clipLeft  裁剪窗口左缘（绘制单位），{@code NEGATIVE_INFINITY} 表示不裁
      * @param clipRight 裁剪窗口右缘（绘制单位），{@code POSITIVE_INFINITY} 表示不裁
+     * @param animated  是否为 {@code OpV} / {@code MAX} 的动态色相蒙版模式：{@code true} 时只画一遍主体
+     *                  （描边那层会在偏移处再画一次，两层色相叠加会糊掉，见
+     *                  {@link #drawBadgeText} 里的说明）
      */
-    private static void drawGlyphs(Font font, String text, float x, float edge,
+    private static void drawGlyphs(Font font, String text, int color, float x, float edge,
                                    float clipLeft, float clipRight,
-                                   Matrix4f matrix, MultiBufferSource buffer, int light) {
+                                   Matrix4f matrix, MultiBufferSource buffer, int light, boolean animated) {
+        // 描边色只跟主体色有关，逐字算一遍是浪费——提到循环外
+        int edgeColor = edgeColorFor(color);
         for (int i = 0; i < text.length(); ) {
             int codePoint = text.codePointAt(i);
             String glyph = new String(Character.toChars(codePoint));
@@ -410,8 +523,10 @@ public final class ElementMarkClient {
             // 字形中心落在窗口内才画；不裁时两端是无穷，判据恒真
             float center = x + advance * 0.5F;
             if (center >= clipLeft && center <= clipRight) {
-                font.drawInBatch(glyph, x + edge, edge, COLOR_EDGE, false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
-                font.drawInBatch(glyph, x, 0.0F, COLOR_FILL, false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
+                if (!animated) {
+                    font.drawInBatch(glyph, x + edge, edge, edgeColor, false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
+                }
+                font.drawInBatch(glyph, x, 0.0F, color, false, matrix, buffer, Font.DisplayMode.NORMAL, 0, light);
             }
             x += advance;
         }

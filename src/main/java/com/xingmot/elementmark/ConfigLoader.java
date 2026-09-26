@@ -45,6 +45,19 @@ public final class ConfigLoader {
     /** 保留段名：超长缩写的滚动方式，sway/loop（配置界面里是可切换的按钮） */
     private static final String SECTION_SCROLL = "scroll";
 
+    /**
+     * 该段名是否为保留段（而非"材料名"）。
+     *
+     * <p>抽成公开方法是为了让 {@link BuiltinNames} 用<b>同一套口径</b>解析内置表：
+     * 内置表就是 {@code elementmark.txt} 的原文，末尾同样带着 corner / font_scale / scroll
+     * 三个保留段，若两处各判一遍、判据一旦漂移，内置表里就会混进名为 "corner" 的假材料。
+     */
+    public static boolean isReservedSection(String section) {
+        return SECTION_CORNER.equals(section)
+                || SECTION_FONT_SCALE.equals(section)
+                || SECTION_SCROLL.equals(section);
+    }
+
     public enum Corner {
         TOP_LEFT(0, 0),
         TOP_RIGHT(1, 0),
@@ -162,7 +175,7 @@ public final class ConfigLoader {
      * {@link #DEFAULT_FONT_SCALE} / {@link #DEFAULT_SCROLL_MODE} 以及 {@code corner} 字段初值
      * 同值——前者管"文件不存在时写出什么"，后者管"文件存在但缺该段时用什么"。
      */
-    private static final String DEFAULT_CONTENT = """
+    private static final String DEFAULT_FALLBACK = """
             # Element Mark config
             # Format: one entry per line, "section:value" or "material:abbreviation"
             #
@@ -203,6 +216,21 @@ public final class ConfigLoader {
             scroll:loop
             """;
 
+    /**
+     * 首次运行写出的配置全文。
+     *
+     * <p><b>优先用打进 jar 的那份 {@code elementmark.txt}</b>（{@link BuiltinNames#rawContent()}）——
+     * 它就是"把 elementmark.txt 直接集成进模组"的落点：新装用户开箱即得 678 行的中文名表
+     * （118 元素 + 536 条 GTCEu 材料），而不是只有三个保留段的空壳。
+     *
+     * <p>只有在该资源读不到时（打包异常）才退回 {@link #DEFAULT_FALLBACK}，
+     * 保证模组在任何情况下都写得出一个语法合法的配置文件。
+     */
+    public static String defaultContent() {
+        String builtin = BuiltinNames.rawContent();
+        return builtin.isEmpty() ? DEFAULT_FALLBACK : builtin;
+    }
+
     /** material（小写） -> 缩写。用 LinkedHashMap 保留文件顺序，便于日志与调试 */
     private static volatile Map<String, String> entries = Map.of();
     private static volatile Corner corner = Corner.TOP_LEFT;
@@ -224,8 +252,9 @@ public final class ConfigLoader {
         try {
             Files.createDirectories(path.getParent());
             if (Files.notExists(path)) {
-                Files.writeString(path, DEFAULT_CONTENT, StandardCharsets.UTF_8);
-                LOGGER.info("[ElementMark] 已生成默认配置文件：{}", path);
+                Files.writeString(path, defaultContent(), StandardCharsets.UTF_8);
+                LOGGER.info("[ElementMark] 已生成默认配置文件（内置中文名表 {} 条）：{}",
+                        BuiltinNames.size(), path);
             }
         } catch (IOException e) {
             LOGGER.error("[ElementMark] 配置文件创建失败：{}", path, e);

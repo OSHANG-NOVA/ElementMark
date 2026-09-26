@@ -1,5 +1,7 @@
 package com.xingmot.elementmark;
 
+import com.xingmot.elementmark.circuit.CircuitDetector;
+
 import net.minecraft.server.packs.resources.PreparableReloadListener;
 import net.minecraft.server.packs.resources.ResourceManager;
 import net.minecraft.util.profiling.ProfilerFiller;
@@ -22,6 +24,8 @@ public final class ConfigReloadListener implements PreparableReloadListener {
         return CompletableFuture.runAsync(() -> {
             ConfigLoader.reload();
             BadgeResolver.invalidate();
+            // 电路侧同样按物品缓存，必须一起清；手写映射也在这次清空后重新解析
+            CircuitDetector.invalidate();
         }, backgroundExecutor).thenCompose(barrier::wait);
     }
 }
